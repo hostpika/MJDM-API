@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  cloud-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mjdm-cloud-api-staging
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=staging
+      - PORT=3000
+      - DATABASE_URL=postgres://mjdm_staging:StagingSecret999!@postgres:5432/mjdm_staging
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=staging_jwt_secret_high_entropy_32_characters_minimum
+      - SERVER_PEPPER=staging_server_pepper_high_entropy_32_characters_min
+      - ES256_KID=staging-2026-1
+      - POLAR_WEBHOOK_SECRET=staging_polar_webhook_secret_key_32_chars
+      - LEMON_SQUEEZY_WEBHOOK_SECRET=staging_ls_webhook_secret_key_32_chars
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mjdm-postgres-staging
+    restart: always
+    environment:
+      POSTGRES_USER: mjdm_staging
+      POSTGRES_PASSWORD: StagingSecret999!
+      POSTGRES_DB: mjdm_staging
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mjdm_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: mjdm-redis-staging
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_staging_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_staging_data:
+  redis_staging_data:
