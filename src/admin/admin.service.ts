@@ -10,6 +10,8 @@ export interface AdminStats {
   activeDevices: number;
   totalRevenueMinor: number;
   totalRevenueFormatted: string;
+  /** "database" = live numbers; "sample" = no database connected, illustrative figures. */
+  source: "database" | "sample";
 }
 
 export interface AuditLogEntry {
@@ -48,16 +50,35 @@ export class AdminService {
   ) {}
 
   async getStats(): Promise<AdminStats> {
-    const plans = this.licensesService?.getPlans() ?? [];
-    // Aggregate metrics
-    const stats: AdminStats = {
+    if (this.db?.connected) {
+      const db = this.db;
+      const one = async (sql: string): Promise<number> => {
+        const r = await db.query<{ n: string | null }>(sql);
+        return Number(r.rows[0]?.n ?? 0);
+      };
+      const revenue = await one(
+        "SELECT COALESCE(SUM(amount_minor), 0) AS n FROM payments WHERE status IN ('paid','succeeded','completed')"
+      );
+      return {
+        totalUsers: await one("SELECT COUNT(*) AS n FROM users"),
+        activeLicenses: await one("SELECT COUNT(*) AS n FROM licenses WHERE status = 'active'"),
+        activeDevices: await one(
+          "SELECT COUNT(*) AS n FROM license_activations WHERE status = 'active'"
+        ),
+        totalRevenueMinor: revenue,
+        totalRevenueFormatted: `$${(revenue / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        source: "database",
+      };
+    }
+    // No database connected (development / tests): clearly marked illustrative figures.
+    return {
       totalUsers: 1420,
       activeLicenses: 1180,
       activeDevices: 2450,
-      totalRevenueMinor: 4529000, // $45,290.00
+      totalRevenueMinor: 4529000,
       totalRevenueFormatted: "$45,290.00",
+      source: "sample",
     };
-    return stats;
   }
 
   async recordAudit(

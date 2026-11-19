@@ -17,6 +17,9 @@ export const envSchema = z.object({
     .min(32, "SERVER_PEPPER must be at least 32 characters long")
     .default("mjdm_server_pepper_for_license_hmac_32_chars_min!"),
   CORS_ORIGINS: z.string().default("http://localhost:3000,http://localhost:5173"),
+  ADMIN_EMAIL: z.string().email().optional(),
+  ADMIN_PASSWORD_HASH: z.string().startsWith("$argon2id$").optional(),
+  ADMIN_TOTP_SECRET: z.string().regex(/^[A-Z2-7]{16,}$/, "base32 secret").optional(),
   ES256_PRIVATE_KEY_PEM: z.string().optional(),
   ES256_PUBLIC_KEY_PEM: z.string().optional(),
 });

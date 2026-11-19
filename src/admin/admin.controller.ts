@@ -7,11 +7,15 @@ import {
   Param,
   Post,
   Query,
+  Req,
+  UseGuards,
 } from "@nestjs/common";
 import { ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
+import { AdminGuard, type AdminRequest } from "./admin.guard";
 import { AdminService } from "./admin.service";
 
 @ApiTags("Admin Portal")
+@UseGuards(AdminGuard)
 @Controller("v1/admin")
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
@@ -42,10 +46,12 @@ export class AdminController {
       resource: string;
       resourceId?: string;
       metadata?: Record<string, unknown>;
-    }
+    },
+    @Req() req?: AdminRequest
   ) {
+    // The actor is the authenticated admin, never a value the client can choose.
     return this.adminService.recordAudit(
-      body.actorId,
+      req?.admin?.sub ?? body.actorId,
       body.action,
       body.resource,
       body.resourceId,

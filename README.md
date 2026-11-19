@@ -8,7 +8,7 @@
 ![NestJS](https://img.shields.io/badge/NestJS-10-E0234E?logo=nestjs)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql)
-![Tests](https://img.shields.io/badge/tests-87%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-111%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
 Deployed at **`https://api.mjdm.us`** · Interactive docs at **`/docs`** · OpenAPI JSON at **`/api/openapi.json`**
@@ -45,7 +45,8 @@ Deployed at **`https://api.mjdm.us`** · Interactive docs at **`/docs`** · Open
 | **Sync** | Stores *encrypted* settings/queue records for users who enable cloud sync. The server cannot read them (zero knowledge) |
 | **Updates** | Serves the update feed the desktop app polls, and lets admins publish releases |
 | **Account** | Profile, password change, devices, invoices, data export/erasure |
-| **Admin** | KPI stats and an audit trail for the admin panel |
+| **Admin** | Admin login (password + TOTP), KPI stats, audit trail |
+| **Site content** | The website's editable content (downloads, version, prices, announcement, text), managed from the admin panel |
 | **Observability** | Health probes, Prometheus metrics, log redaction |
 
 ## The MJDM repositories
@@ -101,7 +102,24 @@ Base URL: `https://api.mjdm.us` (locally `http://localhost:3001`). All paths bel
 `GET /:target/:arch/:currentVersion` (what the app polls) · `GET|POST /releases`
 
 ### Admin — `/v1/admin`
-`GET /stats` · `GET /audit-logs` · `POST /actions/log`  ⚠️ **currently unauthenticated — see [Known gaps](#known-gaps)**
+All `/v1/admin/*` endpoints need an **admin session**.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/admin/auth/login` | email + password + 6-digit TOTP code → HttpOnly cookie |
+| GET | `/v1/admin/auth/me` | current admin |
+| POST | `/v1/admin/auth/logout` | end the session |
+| GET | `/v1/admin/stats` | users, licenses, devices, revenue (`source: "database"` or `"sample"` when no DB) |
+| GET | `/v1/admin/audit-logs` | audit trail |
+| POST | `/v1/admin/actions/log` | add an audit entry (the actor is the logged-in admin) |
+| GET / PUT | `/v1/admin/site/content` | read / replace the website content (validated, audited) |
+
+### Website content — `/v1/site/content` (public)
+`GET /v1/site/content` returns what the public website renders: announcement bar, current release
+(version, download links, sizes, SHA-256), extension-store links, prices, and per-language text
+overrides. The website caches it for ~30 s. Stored in PostgreSQL (`site_content` table) or, without a
+database, in `SITE_CONTENT_FILE` (default `data/site-content.json`). Links must be `https://` or a
+site path (`javascript:`, `data:` and protocol-relative links are rejected).
 
 ### Operations
 `GET /health/live` · `GET /health/ready` · `GET /metrics`
@@ -147,13 +165,15 @@ docker compose up -d
 export DATABASE_URL=postgres://postgres:postgrespassword@localhost:5432/mjdm_cloud
 pnpm migrate                      # apply SQL migrations
 
-pnpm dev                          # http://localhost:3001  (docs at /docs)
+pnpm dev                          # builds, then http://localhost:3001  (docs at /docs)
 ```
 
 Without a reachable PostgreSQL the service starts in a **standalone in-memory mode** (a warning
 is logged). That is convenient for development and tests, but data disappears on restart.
 
 > The bundled `docker-compose.yml` is for **local development only** (default password, ports open).
+>
+> `pnpm dev` compiles with `tsc` first. The `tsx` runner does not emit decorator metadata, which NestJS dependency injection needs.
 
 ## Configuration
 
@@ -167,6 +187,8 @@ Copy `.env.example` to `.env` (never commit it). The environment is validated at
 | `JWT_SECRET`, `JWT_REFRESH_SECRET` | Token signing secrets, ≥ 32 characters, different from each other |
 | `SERVER_PEPPER` | Pepper for license-key HMACs, ≥ 32 characters |
 | `CORS_ORIGINS` | Comma-separated exact origins allowed to call the API with cookies |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `ADMIN_TOTP_SECRET` | The admin account. Generate with `pnpm create-admin you@example.com` |
+| `SITE_CONTENT_FILE` | Where site content is stored without a database (default `data/site-content.json`) |
 | `ES256_PRIVATE_KEY_PEM`, `ES256_PUBLIC_KEY_PEM` | License signing key pair |
 | `LEMON_SQUEEZY_WEBHOOK_SECRET`, `POLAR_WEBHOOK_SECRET` | Payment webhook secrets |
 
@@ -198,7 +220,7 @@ k6 run ops/k6-load-test.js   # load test
 
 ```bash
 pnpm typecheck
-pnpm test          # 87 tests
+pnpm test          # 111 tests
 pnpm build         # compiles to dist/
 ```
 
@@ -224,6 +246,7 @@ Runbooks (`docs/ops/`): cloud runbook, rollback plan, support runbook, launch ch
 
 ## Security
 
+- **Admin:** configured only through the environment (no sign-up), Argon2id password **and** mandatory TOTP, 1-hour HttpOnly SameSite=Strict cookie, login rate limits per IP and per account, constant-time checks, one generic error for any failure, CSRF protection on writes.
 - Argon2id password hashing; per-IP rate limiting on auth routes.
 - HttpOnly cookie sessions with CSRF protection; no tokens exposed to browser JavaScript.
 - Production start-up guard against default secrets.
@@ -234,12 +257,11 @@ Runbooks (`docs/ops/`): cloud runbook, rollback plan, support runbook, launch ch
 
 ## Known gaps
 
-1. **`/v1/admin/*` has no authentication or role check.** Do not expose the admin endpoints (or the
-   admin panel) publicly until an admin login with a role guard and MFA exists.
+1. **Admin endpoints for users, licenses, devices, payments and releases do not exist yet** (the admin panel shows sample data for those screens). Admin login, stats, audit and site content are real.
 2. Rate limiting is in-process (per instance), not shared; Redis appears in the compose file but is not used by the code yet.
 3. No `Dockerfile` / production compose, and no nginx config yet.
 4. **No email is ever sent**, and email-verification / password-reset tokens are held in process memory (lost on restart, not shared between instances). Wire a mail provider and persist those tokens before relying on those flows.
-5. The portal and admin UIs do not call this API yet (they use sample data).
+5. The customer portal does not call this API yet (it uses sample data). Audit entries are kept in memory unless a database is connected.
 6. Dependencies have not been audited yet (run `pnpm audit` before launch).
 
 ## Repository layout
@@ -252,12 +274,14 @@ src/
   billing/         checkout, payment webhooks, invoices
   sync/            zero-knowledge record storage and quotas
   updates/         release feed and publishing
-  admin/           stats and audit log
+  admin/           admin login (TOTP), guard, stats, audit log
+  site/            website content: schema, storage, public + admin endpoints
   observability/   metrics, error tracking, redaction
   health/          liveness and readiness
   database/        connection, migrations
   config/          environment schema and service
 test/              Vitest suites
+scripts/           create-admin (generates the admin credentials)
 ops/               backup, restore, k6 load test
 docs/              legal, runbooks, release notes, security reviews (copies)
 ```
@@ -272,7 +296,9 @@ docs/              legal, runbooks, release notes, security reviews (copies)
 - Production-এ জানা ডিফল্ট secret থাকলে server চালুই হয় না।
 - License token **ES256** দিয়ে সই করা, যাতে app অফলাইনেও যাচাই করতে পারে।
 - Sync **zero-knowledge**: server শুধু এনক্রিপ্টেড ডেটা রাখে।
-- ৮৭টা test পাশ।
-- ⚠️ **সতর্কতা:** `/v1/admin` এখনও auth ছাড়া, তাই admin panel public করার আগে login ও role guard বানাতে হবে।
+- ১১১টা test পাশ।
+- **Admin login** আসল: password + authenticator কোড (TOTP), সব `/v1/admin/*` সুরক্ষিত।
+- **Site content API:** website-এর download লিংক, version, দাম, লেখা admin panel থেকে বদলানো যায়।
+- ⚠️ Users/Licenses/Devices/Payments/Releases-এর admin endpoint এখনও নেই।
 
 Proprietary — © MJNEX Technology. সর্বস্বত্ব সংরক্ষিত।
