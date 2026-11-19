@@ -48,6 +48,34 @@ jobs:
           rsync -az --delete --exclude '.env' \
             "$RUNNER_TEMP/bundle/" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/var/www/mjdm/api/"
 
+      - name: Sync admin account settings to the server
+        env:
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
+        run: |
+          # The upload above never touches the server's .env, so the admin account is set here.
+          # Skipped when the secrets are not defined. The values never appear in the logs.
+          if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD_HASH" ]; then
+            echo "ADMIN_EMAIL / ADMIN_PASSWORD_HASH secrets not set: leaving the server .env as it is"
+            exit 0
+          fi
+          umask 077
+          {
+            echo "ADMIN_EMAIL=$ADMIN_EMAIL"
+            echo "ADMIN_PASSWORD_HASH='$ADMIN_PASSWORD_HASH'"
+          } > "$RUNNER_TEMP/admin.env"
+          scp "$RUNNER_TEMP/admin.env" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/mjdm-admin.env"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" '
+            set -e
+            cd /var/www/mjdm/api
+            touch .env && chmod 600 .env
+            sed -i "/^ADMIN_EMAIL=/d;/^ADMIN_PASSWORD_HASH=/d" .env
+            [ -n "$(tail -c1 .env)" ] && echo >> .env
+            cat /tmp/mjdm-admin.env >> .env
+            rm -f /tmp/mjdm-admin.env
+            echo "admin settings written to .env"
+          '
+
       - name: Migrate and restart
         run: |
           ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'bash -se' <<'REMOTE'
