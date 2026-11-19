@@ -45,7 +45,7 @@ jobs:
 
       - name: Upload
         run: |
-          rsync -az --delete --exclude '.env' \
+          rsync -az --delete --exclude '.env' --exclude '.env.bak*' --exclude 'data' \
             "$RUNNER_TEMP/bundle/" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/var/www/mjdm/api/"
 
       - name: Sync admin account settings to the server
