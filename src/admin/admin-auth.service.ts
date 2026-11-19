@@ -42,6 +42,35 @@ export class AdminAuthService {
     return path.resolve(process.env.ADMIN_MFA_FILE ?? "data/admin-mfa.json");
   }
 
+  private get passwordFile(): string {
+    return path.resolve(process.env.ADMIN_PASSWORD_FILE ?? "data/admin-password.json");
+  }
+
+  /** A password changed from the panel (saved on disk) wins over the one in the environment. */
+  private passwordHash(): string {
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.passwordFile, "utf-8")) as { hash?: string };
+      if (typeof saved.hash === "string" && saved.hash.startsWith("$argon2id$")) return saved.hash;
+    } catch {
+      /* no saved password: use the environment */
+    }
+    return this.config.get("ADMIN_PASSWORD_HASH") as string;
+  }
+
+  async changePassword(current: string, next: string, ip: string): Promise<void> {
+    this.limiter.check(`admin-pw-change:${ip}`, 5, 15 * 60_000);
+    if (!(await this.passwords.verify(this.passwordHash(), current))) {
+      throw new UnauthorizedException("Current password is wrong");
+    }
+    if (next.length < 10) throw new BadRequestException("The new password must be at least 10 characters");
+    if (next === current) throw new BadRequestException("Choose a password different from the current one");
+    const hash = await this.passwords.hash(next);
+    fs.mkdirSync(path.dirname(this.passwordFile), { recursive: true });
+    fs.writeFileSync(this.passwordFile, JSON.stringify({ hash, changedAt: new Date().toISOString() }), {
+      mode: 0o600,
+    });
+  }
+
   get configured(): boolean {
     return Boolean(this.config.get("ADMIN_EMAIL") && this.config.get("ADMIN_PASSWORD_HASH"));
   }
@@ -87,7 +116,7 @@ export class AdminAuthService {
     if (this.mfaStatus().locked) {
       throw new BadRequestException("2FA is enforced by the server configuration");
     }
-    const okPw = await this.passwords.verify(this.config.get("ADMIN_PASSWORD_HASH") as string, password);
+    const okPw = await this.passwords.verify(this.passwordHash(), password);
     if (!okPw || !verifyTotp(secret, code)) {
       throw new UnauthorizedException("Wrong password or code");
     }
@@ -108,10 +137,7 @@ export class AdminAuthService {
       crypto.createHash("sha256").update(expectedEmail).digest()
     );
     // Always run the password hash so timing does not reveal whether the email exists.
-    const passwordOk = await this.passwords.verify(
-      this.config.get("ADMIN_PASSWORD_HASH") as string,
-      password
-    );
+    const passwordOk = await this.passwords.verify(this.passwordHash(), password);
     const secret = this.mfaSecret();
     const codeOk = secret === null || verifyTotp(secret, code ?? "");
     if (!(emailOk && passwordOk && codeOk)) {

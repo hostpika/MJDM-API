@@ -248,3 +248,38 @@ describe("Optional two-step verification (default OFF)", () => {
     await expect(auth.disableMfa("pw-pw-pw-pw", totpCode(secret))).rejects.toThrow(/enforced/);
   });
 });
+
+describe("Admin password change", () => {
+  const passwords = new PasswordService();
+  const email = "boss@mjdm.us";
+  async function setup() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mjdm-pw-"));
+    process.env.ADMIN_PASSWORD_FILE = path.join(dir, "p.json");
+    process.env.ADMIN_MFA_FILE = path.join(dir, "m.json");
+    const env = { NODE_ENV: "test", ADMIN_EMAIL: email, ADMIN_PASSWORD_HASH: await passwords.hash("old-password-1") };
+    const config = { get: (k: string) => validateEnv(env)[k as never], corsOrigins: [] };
+    return new AdminAuthService(config as never, passwords, new RateLimiterService());
+  }
+
+  it("changes the password: new one works, old one stops working", async () => {
+    const auth = await setup();
+    await auth.changePassword("old-password-1", "brand-new-pass-2", "8.8.8.1");
+    await expect(auth.login(email, "old-password-1", undefined, "8.8.8.2")).rejects.toThrow(/Invalid credentials/);
+    const token = await auth.login(email, "brand-new-pass-2", undefined, "8.8.8.3");
+    expect(auth.verify(token).role).toBe("admin");
+  });
+
+  it("refuses a wrong current password, a short one and an unchanged one", async () => {
+    const auth = await setup();
+    await expect(auth.changePassword("wrong", "brand-new-pass-2", "8.8.8.4")).rejects.toThrow(/Current password is wrong/);
+    await expect(auth.changePassword("old-password-1", "short", "8.8.8.4")).rejects.toThrow(/at least 10/);
+    await expect(auth.changePassword("old-password-1", "old-password-1", "8.8.8.4")).rejects.toThrow(/different/);
+    await auth.login(email, "old-password-1", undefined, "8.8.8.5"); // still the old one
+  });
+
+  it("is rate limited", async () => {
+    const auth = await setup();
+    for (let i = 0; i < 5; i++) await auth.changePassword("wrong", "x".repeat(12), "8.8.8.6").catch(() => undefined);
+    await expect(auth.changePassword("old-password-1", "x".repeat(12), "8.8.8.6")).rejects.toThrow(/Rate limit/);
+  });
+});

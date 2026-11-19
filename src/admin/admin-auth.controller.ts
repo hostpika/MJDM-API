@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
-import { IsEmail, IsNotEmpty, IsOptional, IsString, Matches } from "class-validator";
+import { IsEmail, IsNotEmpty, IsOptional, IsString, Matches, MaxLength, MinLength } from "class-validator";
 import type { Request, Response } from "express";
 import { AppConfigService } from "../config/config.service";
 import { ADMIN_COOKIE, ADMIN_SESSION_SECONDS, AdminAuthService } from "./admin-auth.service";
@@ -28,6 +28,17 @@ export class AdminLoginDto {
   @IsOptional()
   @Matches(/^\d{6}$/, { message: "code must be the 6-digit authenticator code" })
   code?: string;
+}
+
+export class ChangePasswordDto {
+  @IsString()
+  @IsNotEmpty()
+  currentPassword!: string;
+
+  @IsString()
+  @MinLength(10, { message: "The new password must be at least 10 characters" })
+  @MaxLength(200)
+  newPassword!: string;
 }
 
 export class MfaCodeDto {
@@ -118,6 +129,15 @@ export class AdminAuthController {
   async mfaDisable(@Body() dto: MfaDisableDto) {
     await this.auth.disableMfa(dto.password, dto.code);
     return this.auth.mfaStatus();
+  }
+
+  @Post("password")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: "Change the admin password (needs the current password)" })
+  async changePassword(@Body() dto: ChangePasswordDto, @Req() req: AdminRequest) {
+    await this.auth.changePassword(dto.currentPassword, dto.newPassword, req.ip ?? "ip");
+    return { success: true };
   }
 
   @Post("logout")
