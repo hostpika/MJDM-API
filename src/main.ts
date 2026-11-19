@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import * as fs from "node:fs";
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
@@ -60,6 +61,12 @@ export async function createNestApp() {
 }
 
 async function bootstrap() {
+  // Load ./.env if present (real environment variables win). Built into Node 22, no dependency.
+  if (fs.existsSync(".env")) {
+    const before = { ...process.env };
+    process.loadEnvFile(".env");
+    for (const [k, v] of Object.entries(before)) if (v !== undefined) process.env[k] = v;
+  }
   const { app, config } = await createNestApp();
   const port = config.get("PORT");
   await app.listen(port);

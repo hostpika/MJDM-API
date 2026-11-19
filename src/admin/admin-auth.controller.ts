@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
-import { IsEmail, IsNotEmpty, IsString, Matches } from "class-validator";
+import { IsEmail, IsNotEmpty, IsOptional, IsString, Matches } from "class-validator";
 import type { Request, Response } from "express";
 import { AppConfigService } from "../config/config.service";
 import { ADMIN_COOKIE, ADMIN_SESSION_SECONDS, AdminAuthService } from "./admin-auth.service";
@@ -24,8 +24,21 @@ export class AdminLoginDto {
   @IsNotEmpty()
   password!: string;
 
+  /** Only needed when two-step verification is switched on. */
+  @IsOptional()
+  @Matches(/^\d{6}$/, { message: "code must be the 6-digit authenticator code" })
+  code?: string;
+}
+
+export class MfaCodeDto {
   @Matches(/^\d{6}$/, { message: "code must be the 6-digit authenticator code" })
   code!: string;
+}
+
+export class MfaDisableDto extends MfaCodeDto {
+  @IsString()
+  @IsNotEmpty()
+  password!: string;
 }
 
 @ApiTags("Admin Auth")
@@ -47,7 +60,7 @@ export class AdminAuthController {
 
   @Post("login")
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Admin login: email + password + TOTP code (sets an HttpOnly cookie)" })
+  @ApiOperation({ summary: "Admin login: email + password (+ TOTP code when 2FA is on)" })
   async login(
     @Body() dto: AdminLoginDto,
     @Req() req: Request,
@@ -71,7 +84,40 @@ export class AdminAuthController {
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: "Current admin session" })
   me(@Req() req: AdminRequest) {
-    return { email: req.admin?.sub, role: "admin", mfa: true };
+    return { email: req.admin?.sub, role: "admin", mfa: this.auth.mfaStatus().enabled };
+  }
+
+  @Get("mfa")
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: "Is two-step verification on?" })
+  mfa() {
+    return this.auth.mfaStatus();
+  }
+
+  @Post("mfa/setup")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: "Start turning 2FA on: returns a secret to add to an authenticator app" })
+  mfaSetup(@Req() req: AdminRequest) {
+    return this.auth.beginMfaSetup(req.admin?.sub ?? "admin");
+  }
+
+  @Post("mfa/enable")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: "Finish turning 2FA on by entering a current code" })
+  mfaEnable(@Body() dto: MfaCodeDto) {
+    this.auth.enableMfa(dto.code);
+    return this.auth.mfaStatus();
+  }
+
+  @Post("mfa/disable")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: "Turn 2FA off (needs the password and a current code)" })
+  async mfaDisable(@Body() dto: MfaDisableDto) {
+    await this.auth.disableMfa(dto.password, dto.code);
+    return this.auth.mfaStatus();
   }
 
   @Post("logout")

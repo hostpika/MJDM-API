@@ -187,3 +187,64 @@ describe("Config", () => {
     expect(() => validateEnv({ NODE_ENV: "test", ADMIN_PASSWORD_HASH: "hunter2" })).toThrow();
   });
 });
+
+describe("Optional two-step verification (default OFF)", () => {
+  const passwords = new PasswordService();
+  const email = "boss@mjdm.us";
+
+  async function setup() {
+    process.env.ADMIN_MFA_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mjdm-mfa-")), "m.json");
+    const env = { NODE_ENV: "test", ADMIN_EMAIL: email, ADMIN_PASSWORD_HASH: await passwords.hash("correct horse battery") };
+    const config = { get: (k: string) => validateEnv(env)[k as never], corsOrigins: [] };
+    return new AdminAuthService(config as never, passwords, new RateLimiterService());
+  }
+
+  it("logs in with the password alone while 2FA is off", async () => {
+    const auth = await setup();
+    expect(auth.mfaStatus()).toEqual({ enabled: false, locked: false });
+    const token = await auth.login(email, "correct horse battery", undefined, "7.7.7.1");
+    expect(auth.verify(token).role).toBe("admin");
+  });
+
+  it("still rejects a wrong password with 2FA off", async () => {
+    const auth = await setup();
+    await expect(auth.login(email, "nope", undefined, "7.7.7.2")).rejects.toThrow(/Invalid credentials/);
+  });
+
+  it("turns on only after a correct code, then requires the code at login", async () => {
+    const auth = await setup();
+    const { secret, otpauth } = auth.beginMfaSetup(email);
+    expect(otpauth).toContain(secret);
+    expect(() => auth.enableMfa("000000")).toThrow(/not right/);
+    expect(auth.mfaStatus().enabled).toBe(false);
+    auth.enableMfa(totpCode(secret));
+    expect(auth.mfaStatus().enabled).toBe(true);
+
+    await expect(auth.login(email, "correct horse battery", undefined, "7.7.7.3")).rejects.toThrow(/Invalid credentials/);
+    await expect(auth.login(email, "correct horse battery", "000000", "7.7.7.3")).rejects.toThrow(/Invalid credentials/);
+    const token = await auth.login(email, "correct horse battery", totpCode(secret), "7.7.7.3");
+    expect(auth.verify(token).role).toBe("admin");
+  });
+
+  it("turning it off needs the password and a current code", async () => {
+    const auth = await setup();
+    const { secret } = auth.beginMfaSetup(email);
+    auth.enableMfa(totpCode(secret));
+    await expect(auth.disableMfa("wrong", totpCode(secret))).rejects.toThrow(/Wrong password or code/);
+    await expect(auth.disableMfa("correct horse battery", "000000")).rejects.toThrow(/Wrong password or code/);
+    expect(auth.mfaStatus().enabled).toBe(true);
+    await auth.disableMfa("correct horse battery", totpCode(secret));
+    expect(auth.mfaStatus().enabled).toBe(false);
+    await auth.login(email, "correct horse battery", undefined, "7.7.7.4");
+  });
+
+  it("cannot be switched off from the panel when the server enforces it", async () => {
+    process.env.ADMIN_MFA_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mjdm-mfa-")), "m.json");
+    const secret = generateTotpSecret();
+    const env = { NODE_ENV: "test", ADMIN_EMAIL: email, ADMIN_PASSWORD_HASH: await passwords.hash("pw-pw-pw-pw"), ADMIN_TOTP_SECRET: secret };
+    const config = { get: (k: string) => validateEnv(env)[k as never], corsOrigins: [] };
+    const auth = new AdminAuthService(config as never, passwords, new RateLimiterService());
+    expect(auth.mfaStatus()).toEqual({ enabled: true, locked: true });
+    await expect(auth.disableMfa("pw-pw-pw-pw", totpCode(secret))).rejects.toThrow(/enforced/);
+  });
+});
