@@ -148,6 +148,38 @@ describe("Site content", () => {
     expect(again.content.overrides.en["hero.titleLine1"]).toBe("Fast.");
   });
 
+  it("accepts SEO and analytics settings and keeps pre-SEO documents valid", async () => {
+    process.env.SITE_CONTENT_FILE = tmp();
+    const svc = new SiteContentService();
+    const next = structuredClone(DEFAULT_SITE_CONTENT);
+    next.seo.titleSuffix = " | MJDM";
+    next.seo.ga4Id = "G-ABC123XYZ9";
+    next.seo.gtmId = "GTM-ABCD123";
+    next.seo.metaPixelId = "1234567890";
+    next.seo.googleVerification = "JWgwuy1SW10zErxnSspbOuvgzSLyud_au7Rj9XVLTos";
+    next.seo.pages["/docs"] = { title: "Docs", description: "Guides" };
+    expect((await svc.set(next, "boss@mjdm.us")).content.seo.ga4Id).toBe("G-ABC123XYZ9");
+
+    const legacy = structuredClone(DEFAULT_SITE_CONTENT) as Record<string, unknown>;
+    delete legacy.seo;
+    const old = await new SiteContentService().set(legacy, "boss@mjdm.us");
+    expect(old.content.seo.ga4Id).toBe("");
+  });
+
+  it.each([
+    ["markup in the GA4 id", (c: typeof DEFAULT_SITE_CONTENT) => (c.seo.ga4Id = 'G-1"><script>')],
+    ["a bad GTM id", (c: typeof DEFAULT_SITE_CONTENT) => (c.seo.gtmId = "UA-1234")],
+    ["a non-numeric pixel id", (c: typeof DEFAULT_SITE_CONTENT) => (c.seo.metaPixelId = "12ab")],
+    ["a quote in the verification code", (c: typeof DEFAULT_SITE_CONTENT) => (c.seo.googleVerification = 'a"b')],
+    ["a javascript: social image", (c: typeof DEFAULT_SITE_CONTENT) => (c.seo.ogImage = "javascript:alert(1)")],
+    ["a bad page path", (c: typeof DEFAULT_SITE_CONTENT) => (c.seo.pages["//evil"] = { title: "x", description: "y" })],
+  ])("rejects %s", async (_n, mutate) => {
+    process.env.SITE_CONTENT_FILE = tmp();
+    const next = structuredClone(DEFAULT_SITE_CONTENT);
+    mutate(next);
+    await expect(new SiteContentService().set(next, "boss@mjdm.us")).rejects.toThrow();
+  });
+
   it.each([
     ["a javascript: link", (c: typeof DEFAULT_SITE_CONTENT) => (c.release.windows.installerUrl = "javascript:alert(1)")],
     ["a protocol-relative link", (c: typeof DEFAULT_SITE_CONTENT) => (c.extensions.chromeUrl = "//evil.example/x")],
