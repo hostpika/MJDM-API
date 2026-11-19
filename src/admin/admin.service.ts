@@ -104,11 +104,16 @@ export class AdminService {
     this.memoryAuditLogs.unshift(entry);
 
     if (this.db?.connected) {
-      await this.db.query(
-        `INSERT INTO audit_logs (id, actor_type, actor_id, action, resource, resource_id, metadata, ip_address, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [entry.id, entry.actorType, entry.actorId, entry.action, entry.resource, entry.resourceId ?? null, JSON.stringify(entry.metadata ?? {}), entry.ipAddress, entry.createdAt]
-      );
+      try {
+        await this.db.query(
+          `INSERT INTO audit_logs (id, actor_type, actor_id, action, resource, resource_id, metadata, ip_address, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [entry.id, entry.actorType, entry.actorId, entry.action, entry.resource, entry.resourceId ?? null, JSON.stringify(entry.metadata ?? {}), entry.ipAddress, entry.createdAt]
+        );
+      } catch (err) {
+        // The change the admin made has already happened; a failed log line must not report it as an error.
+        this.logger.error(`Could not write the audit log entry: ${String(err)}`);
+      }
     }
 
     this.logger.log(`[Audit] ${actorId} executed ${action} on ${resource}:${resourceId ?? "all"}`);
