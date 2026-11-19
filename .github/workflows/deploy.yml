@@ -1,0 +1,71 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test, build, deploy to api.mjdm.us
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f27602971fde565db80 # v4.1.0
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@1a4442cacd436585916779262731c5b162bc6ec7 # v4.2.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+      - name: Assemble production bundle
+        run: |
+          pnpm --filter @mjdm/cloud-api deploy --prod "$RUNNER_TEMP/bundle"
+          cp -r dist "$RUNNER_TEMP/bundle/dist"
+          cp -r src/database/migrations "$RUNNER_TEMP/bundle/dist/database/migrations"
+          rm -rf "$RUNNER_TEMP/bundle"/{src,test,docs,ops}
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Upload
+        run: |
+          rsync -az --delete --exclude '.env' \
+            "$RUNNER_TEMP/bundle/" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/var/www/mjdm/api/"
+
+      - name: Migrate and restart
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd /var/www/mjdm/api
+          node --env-file=.env -e "require('./dist/database/migrate').runMigrations().then(r=>{console.log('migrations',JSON.stringify(r));process.exit(0)}).catch(e=>{console.error(e);process.exit(1)})"
+          pm2 describe mjdm-api >/dev/null 2>&1 \
+            && pm2 restart mjdm-api --update-env \
+            || pm2 start dist/main.js --name mjdm-api --node-args="--env-file=.env"
+          pm2 save
+          REMOTE
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://api.mjdm.us/health || true)
+            echo "attempt $i: HTTP $code"; [ "$code" = "200" ] && exit 0; sleep 5
+          done
+          exit 1
