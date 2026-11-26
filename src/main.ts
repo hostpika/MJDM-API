@@ -10,6 +10,8 @@ import { AppConfigService } from "./config/config.service";
 
 export async function createNestApp() {
   const app = await NestFactory.create(AppModule, {
+    // Stripe signs the exact bytes it sends, so the raw body is kept next to the parsed one.
+    rawBody: true,
     logger: ["error", "warn", "log"],
   });
 
