@@ -13,6 +13,7 @@ import {
 } from "@nestjs/common";
 import { AppConfigService } from "../config/config.service";
 import { LicensesService } from "../licenses/licenses.service";
+import { MailService } from "../settings/mail.service";
 import { SiteContentService } from "../site/site-content.service";
 import {
   bkashCreatePayment,
@@ -87,7 +88,8 @@ export class PaymentsService implements OnModuleInit, OnModuleDestroy {
     private readonly licenses: LicensesService,
     private readonly site: SiteContentService,
     @Optional() private readonly config?: AppConfigService,
-    @Optional() @Inject(PAYMENT_HTTP) private readonly http: HttpFn = realHttp
+    @Optional() @Inject(PAYMENT_HTTP) private readonly http: HttpFn = realHttp,
+    @Optional() private readonly mail?: MailService
   ) {}
 
   onModuleInit(): void {
@@ -470,6 +472,7 @@ export class PaymentsService implements OnModuleInit, OnModuleDestroy {
         issuedBy: by,
       });
       await this.store.updateOrder(orderId, { licenseId: made.licenseId, keyEnc: encryptJson({ key: made.key }, this.pepper) });
+      await this.emailKey(order.email, order.customerName, made.key, made.plan.name);
     } catch (e) {
       // The money arrived but the key could not be made: keep the order paid and let an admin retry.
       this.logger.error(`license for order ${orderId} failed: ${String(e)}`);
@@ -491,7 +494,18 @@ export class PaymentsService implements OnModuleInit, OnModuleDestroy {
       issuedBy: by,
     });
     await this.store.updateOrder(orderId, { licenseId: made.licenseId, keyEnc: encryptJson({ key: made.key }, this.pepper) });
+    await this.emailKey(order.email, order.customerName, made.key, made.plan.name);
     return (await this.store.getOrder(orderId)) as OrderRecord;
+  }
+
+  /** Sends the key to the buyer when an email account is set up. Never fails the payment. */
+  private async emailKey(to: string, name: string | null | undefined, key: string, planName: string): Promise<void> {
+    try {
+      if (!this.mail || !(await this.mail.isConfigured())) return;
+      await this.mail.sendLicense({ to, name, key, planName });
+    } catch (e) {
+      this.logger.warn(`Could not email the license key for a paid order: ${String(e)}`);
+    }
   }
 
   // ───────────────────────── manual payments (customer reports a transaction) ─────────────────────────

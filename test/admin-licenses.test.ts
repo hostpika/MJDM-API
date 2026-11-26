@@ -19,7 +19,7 @@ describe("Admin: issue and revoke licenses by hand", () => {
       return {};
     },
   };
-  const controller = new AdminLicensesController(licenses, adminService as never);
+  const controller = new AdminLicensesController(licenses, adminService as never, { sendLicense: async () => undefined } as never);
   const req = { admin: { sub: "boss@mjdm.us" }, ip: "127.0.0.1" } as unknown as AdminRequest;
 
   it("lists the plans a license can be issued for", () => {

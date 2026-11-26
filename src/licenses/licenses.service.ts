@@ -10,6 +10,7 @@ import {
 } from "@nestjs/common";
 import { AppConfigService } from "../config/config.service";
 import { DatabaseService } from "../database/database.service";
+import { decryptJson, encryptJson } from "../payments/payment-crypto";
 import { ActivateLicenseDto, DeactivateLicenseDto, RefreshLicenseDto } from "./dto/licenses.dto";
 import { Es256Service } from "./es256.service";
 import { LicenseKeyService } from "./key-generator";
@@ -35,6 +36,8 @@ export interface LicenseRecord {
   source?: string;
   note?: string | null;
   issued_by?: string | null;
+  /** The key, encrypted, so an admin can show or email it again. NULL for older licenses. */
+  key_enc?: string | null;
 }
 
 export interface CustomerRecord {
@@ -58,6 +61,8 @@ export interface AdminLicenseRow {
   maxDevices: number;
   expiresAt: string | null;
   createdAt: string;
+  /** A copy of the key is stored (encrypted), so "Show key" and "Email key" work. */
+  keySaved: boolean;
 }
 
 export interface AdminCustomerRow {
@@ -219,13 +224,14 @@ export class LicensesService {
       source: options.source ?? "manual",
       note: options.note ?? null,
       issued_by: options.issuedBy ?? null,
+      key_enc: encryptJson({ key }, pepper),
     };
 
     if (this.db?.connected) {
       await this.db.query(
-        `INSERT INTO licenses (id, user_id, plan_id, key_hmac, status, expires_at, created_at, source, note, issued_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [license.id, license.user_id, license.plan_id, license.key_hmac, license.status, license.expires_at, license.created_at, license.source, license.note, license.issued_by]
+        `INSERT INTO licenses (id, user_id, plan_id, key_hmac, status, expires_at, created_at, source, note, issued_by, key_enc)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [license.id, license.user_id, license.plan_id, license.key_hmac, license.status, license.expires_at, license.created_at, license.source, license.note, license.issued_by, license.key_enc]
       );
     } else {
       this.memoryLicenses.set(licenseId, license);
@@ -299,6 +305,7 @@ export class LicensesService {
         maxDevices: plan?.max_devices ?? 0,
         expiresAt: l.expires_at ? new Date(l.expires_at).toISOString() : null,
         createdAt: new Date(l.created_at).toISOString(),
+        keySaved: Boolean(l.key_enc),
       };
     };
 
@@ -324,6 +331,34 @@ export class LicensesService {
         ).length;
         return toRow(l, c?.email ?? "unknown", c?.display_name ?? null, active);
       });
+  }
+
+  /** The license key again, for an admin who needs to copy it or email it. */
+  async revealKey(
+    licenseId: string
+  ): Promise<{ key: string; email: string; name: string | null; planName: string; expiresAt: string | null }> {
+    const license = await this.findLicenseById(licenseId);
+    if (!license) throw new NotFoundException("License not found");
+    if (!license.key_enc) {
+      throw new BadRequestException(
+        "A copy of this key was not saved (it was issued before keys were stored). Revoke it and issue a new one."
+      );
+    }
+    const pepper =
+      this.config?.get("SERVER_PEPPER") ??
+      process.env.SERVER_PEPPER ??
+      "mjdm_server_pepper_for_license_hmac_32_chars_min!";
+    const key = decryptJson<{ key: string }>(license.key_enc, pepper)?.key;
+    if (!key) throw new BadRequestException("The saved key could not be read. Revoke it and issue a new one.");
+    const rows = await this.listLicensesForAdmin();
+    const row = rows.find((r) => r.id === licenseId);
+    return {
+      key,
+      email: row?.email ?? "",
+      name: row?.customerName ?? null,
+      planName: row?.planName ?? license.plan_id,
+      expiresAt: row?.expiresAt ?? null,
+    };
   }
 
   /** Customers (people who have a license or an order) with what they hold. */
@@ -577,6 +612,10 @@ export class LicensesService {
     const license = await this.findLicenseById(dto.licenseId);
     if (!license || license.status !== "active") {
       throw new ForbiddenException("License is not active or has been revoked");
+    }
+    // A subscription that has run out must stop refreshing too, or its tokens would never end.
+    if (license.expires_at && new Date(license.expires_at).getTime() < Date.now()) {
+      throw new ForbiddenException("License has expired");
     }
 
     const device = await this.findDeviceByUuid(dto.deviceUuid);

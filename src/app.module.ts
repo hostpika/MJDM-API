@@ -9,6 +9,7 @@ import { HealthModule } from "./health/health.module";
 import { LicensesModule } from "./licenses/licenses.module";
 import { ObservabilityModule } from "./observability/observability.module";
 import { PaymentsModule } from "./payments/payments.module";
+import { SettingsModule } from "./settings/settings.module";
 import { SyncModule } from "./sync/sync.module";
 import { UpdatesModule } from "./updates/updates.module";
 
@@ -23,6 +24,7 @@ import { UpdatesModule } from "./updates/updates.module";
     LicensesModule,
     BillingModule,
     PaymentsModule,
+    SettingsModule,
     UpdatesModule,
     AdminModule,
     SyncModule,
