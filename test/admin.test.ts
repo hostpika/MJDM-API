@@ -3,13 +3,13 @@ import { AdminService } from "../src/admin/admin.service";
 import { AdminController } from "../src/admin/admin.controller";
 
 describe("P10-T07: Admin Subsystem (cloud-api)", () => {
-  it("should provide overview stats metrics", async () => {
+  it("reports real numbers, starting from zero, and says they are in-memory without a database", async () => {
     const adminService = new AdminService();
     const stats = await adminService.getStats();
-
-    expect(stats.totalUsers).toBeGreaterThan(0);
-    expect(stats.activeLicenses).toBeGreaterThan(0);
-    expect(stats.totalRevenueMinor).toBeGreaterThan(0);
+    expect(stats.source).toBe("memory");
+    expect(stats.totalUsers).toBe(0);
+    expect(stats.activeLicenses).toBe(0);
+    expect(stats.totalRevenueMinor).toBe(0);
     expect(stats.totalRevenueFormatted).toContain("$");
   });
 

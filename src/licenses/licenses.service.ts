@@ -60,6 +60,31 @@ export interface AdminLicenseRow {
   createdAt: string;
 }
 
+export interface AdminCustomerRow {
+  id: string;
+  email: string;
+  name: string | null;
+  status: string;
+  createdAt: string;
+  licenses: number;
+  activeLicenses: number;
+  devices: number;
+  paidOrders: number;
+}
+
+export interface AdminDeviceRow {
+  id: string;
+  email: string;
+  deviceName: string | null;
+  platform: string;
+  osVersion: string | null;
+  appVersion: string | null;
+  lastSeenAt: string | null;
+  createdAt: string;
+  activeActivations: number;
+  plans: string[];
+}
+
 export interface CreateLicenseOptions {
   source?: string;
   note?: string;
@@ -299,6 +324,137 @@ export class LicensesService {
         ).length;
         return toRow(l, c?.email ?? "unknown", c?.display_name ?? null, active);
       });
+  }
+
+  /** Customers (people who have a license or an order) with what they hold. */
+  async listCustomersForAdmin(search?: string): Promise<AdminCustomerRow[]> {
+    const q = (search ?? "").trim().toLowerCase();
+    if (this.db?.connected) {
+      const res = await this.db.query<Record<string, unknown>>(
+        `SELECT u.id, u.email, u.display_name, u.status, u.created_at,
+                (SELECT COUNT(*) FROM licenses l WHERE l.user_id = u.id) AS licenses,
+                (SELECT COUNT(*) FROM licenses l WHERE l.user_id = u.id AND l.status = 'active') AS active_licenses,
+                (SELECT COUNT(*) FROM devices d WHERE d.user_id = u.id) AS devices,
+                (SELECT COUNT(*) FROM orders o WHERE lower(o.email) = lower(u.email) AND o.status = 'paid') AS paid_orders
+           FROM users u
+          WHERE ($1 = '' OR lower(u.email) LIKE '%' || $1 || '%' OR lower(COALESCE(u.display_name, '')) LIKE '%' || $1 || '%')
+          ORDER BY u.created_at DESC LIMIT 500`,
+        [q]
+      );
+      return res.rows.map((r) => ({
+        id: String(r.id),
+        email: String(r.email),
+        name: (r.display_name as string | null) ?? null,
+        status: String(r.status),
+        createdAt: new Date(r.created_at as string).toISOString(),
+        licenses: Number(r.licenses),
+        activeLicenses: Number(r.active_licenses),
+        devices: Number(r.devices),
+        paidOrders: Number(r.paid_orders),
+      }));
+    }
+    return [...this.memoryCustomers.values()]
+      .filter((c) => !q || c.email.includes(q) || (c.display_name ?? "").toLowerCase().includes(q))
+      .map((c) => {
+        const mine = [...this.memoryLicenses.values()].filter((l) => l.user_id === c.id);
+        return {
+          id: c.id,
+          email: c.email,
+          name: c.display_name,
+          status: "active",
+          createdAt: mine[0]?.created_at ?? new Date().toISOString(),
+          licenses: mine.length,
+          activeLicenses: mine.filter((l) => l.status === "active").length,
+          devices: [...this.memoryDevices.values()].filter((d) => d.user_id === c.id).length,
+          paidOrders: 0,
+        };
+      });
+  }
+
+  /** Every device that has activated a license, with the plans it is currently using. */
+  async listDevicesForAdmin(): Promise<AdminDeviceRow[]> {
+    const plans = new Map(this.getPlans().map((p) => [p.id, p.name]));
+    const planNames = (ids: string | null) =>
+      (ids ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((id) => plans.get(id) ?? id);
+    if (this.db?.connected) {
+      const res = await this.db.query<Record<string, unknown>>(
+        `SELECT d.id, d.device_uuid, d.platform, d.os_version, d.app_version, d.device_name, d.last_seen_at, d.created_at, u.email,
+                (SELECT COUNT(*) FROM license_activations a WHERE a.device_id = d.id AND a.status = 'active') AS active,
+                (SELECT string_agg(DISTINCT l.plan_id, ',') FROM license_activations a JOIN licenses l ON l.id = a.license_id
+                  WHERE a.device_id = d.id AND a.status = 'active') AS plan_ids
+           FROM devices d JOIN users u ON u.id = d.user_id
+          ORDER BY d.last_seen_at DESC NULLS LAST LIMIT 500`
+      );
+      return res.rows.map((r) => ({
+        id: String(r.id),
+        email: String(r.email),
+        deviceName: (r.device_name as string | null) ?? null,
+        platform: String(r.platform),
+        osVersion: (r.os_version as string | null) ?? null,
+        appVersion: (r.app_version as string | null) ?? null,
+        lastSeenAt: r.last_seen_at ? new Date(r.last_seen_at as string).toISOString() : null,
+        createdAt: new Date(r.created_at as string).toISOString(),
+        activeActivations: Number(r.active),
+        plans: planNames(r.plan_ids as string | null),
+      }));
+    }
+    const byId = new Map([...this.memoryCustomers.values()].map((c) => [c.id, c]));
+    return [...this.memoryDevices.values()].map((d) => {
+      const acts = [...this.memoryActivations.values()].filter((a) => a.device_id === d.id && a.status === "active");
+      const planIds = acts.map((a) => this.memoryLicenses.get(a.license_id)?.plan_id).filter(Boolean) as string[];
+      return {
+        id: d.id,
+        email: byId.get(d.user_id)?.email ?? "unknown",
+        deviceName: d.device_name,
+        platform: d.platform,
+        osVersion: d.os_version,
+        appVersion: d.app_version,
+        lastSeenAt: d.last_seen_at,
+        createdAt: d.last_seen_at,
+        activeActivations: acts.length,
+        plans: planNames([...new Set(planIds)].join(",")),
+      };
+    });
+  }
+
+  /** Frees every license slot this device holds (the customer can activate it again later). */
+  async adminDeactivateDevice(deviceId: string): Promise<{ freed: number }> {
+    if (this.db?.connected) {
+      const r = await this.db.query(
+        "UPDATE license_activations SET status = 'revoked', revoked_at = NOW() WHERE device_id = $1 AND status = 'active'",
+        [deviceId]
+      );
+      return { freed: r.rowCount ?? 0 };
+    }
+    let freed = 0;
+    for (const a of this.memoryActivations.values()) {
+      if (a.device_id === deviceId && a.status === "active") {
+        a.status = "revoked";
+        a.revoked_at = new Date().toISOString();
+        freed++;
+      }
+    }
+    return { freed };
+  }
+
+  /** Counts for the overview. */
+  async licenseCounts(): Promise<{ active: number; revoked: number; devices: number; customers: number }> {
+    if (this.db?.connected) {
+      const n = async (sql: string) => Number((await this.db!.query<{ n: string }>(sql)).rows[0]?.n ?? 0);
+      return {
+        active: await n("SELECT COUNT(*) AS n FROM licenses WHERE status = 'active'"),
+        revoked: await n("SELECT COUNT(*) AS n FROM licenses WHERE status <> 'active'"),
+        devices: await n("SELECT COUNT(*) AS n FROM license_activations WHERE status = 'active'"),
+        customers: await n("SELECT COUNT(*) AS n FROM users"),
+      };
+    }
+    const lic = [...this.memoryLicenses.values()];
+    return {
+      active: lic.filter((l) => l.status === "active").length,
+      revoked: lic.filter((l) => l.status !== "active").length,
+      devices: [...this.memoryActivations.values()].filter((a) => a.status === "active").length,
+      customers: this.memoryCustomers.size,
+    };
   }
 
   /**

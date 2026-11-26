@@ -359,6 +359,51 @@ export class PaymentsStore {
     if (cur && cur.status === "pending") this.submissions.set(id, { ...cur, adminNote: note });
   }
 
+  /** Paid money per currency (what customers were charged), open orders, and reports waiting for approval. */
+  async orderStats(since: Date): Promise<{
+    paid: number;
+    pending: number;
+    reportsWaiting: number;
+    revenue: { currency: string; minor: number }[];
+    revenueSince: { currency: string; minor: number }[];
+  }> {
+    if (this.live) {
+      const sums = async (extra: string, values: unknown[]) =>
+        (
+          await this.q(
+            `SELECT COALESCE(currency, 'USD') AS cur, SUM(COALESCE(amount_due_minor, base_usd_minor)) AS total
+               FROM orders WHERE status = 'paid' ${extra} GROUP BY 1 ORDER BY 1`,
+            values
+          )
+        ).rows.map((r) => ({ currency: String(r.cur).trim(), minor: Number(r.total) }));
+      const one = async (sql: string) => Number((await this.q(sql)).rows[0]?.n ?? 0);
+      return {
+        paid: await one("SELECT COUNT(*) AS n FROM orders WHERE status = 'paid'"),
+        pending: await one("SELECT COUNT(*) AS n FROM orders WHERE status = 'pending'"),
+        reportsWaiting: await one("SELECT COUNT(*) AS n FROM payment_submissions WHERE status = 'pending'"),
+        revenue: await sums("", []),
+        revenueSince: await sums("AND paid_at >= $1", [since.toISOString()]),
+      };
+    }
+    const orders = [...this.orders.values()];
+    const total = (list: OrderRecord[]) => {
+      const map = new Map<string, number>();
+      for (const o of list) {
+        const cur = o.currency ?? "USD";
+        map.set(cur, (map.get(cur) ?? 0) + (o.amountDueMinor ?? o.baseUsdMinor));
+      }
+      return [...map.entries()].sort().map(([currency, minor]) => ({ currency, minor }));
+    };
+    const paid = orders.filter((o) => o.status === "paid");
+    return {
+      paid: paid.length,
+      pending: orders.filter((o) => o.status === "pending").length,
+      reportsWaiting: [...this.submissions.values()].filter((s) => s.status === "pending").length,
+      revenue: total(paid),
+      revenueSince: total(paid.filter((o) => o.paidAt && o.paidAt >= since.toISOString())),
+    };
+  }
+
   // ── bKash numbers ──
   async listNumbers(): Promise<BkashNumber[]> {
     if (this.live) {

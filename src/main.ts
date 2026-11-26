@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
+import { raw } from "express";
 import type { Request, Response } from "express";
 import { AppModule } from "./app.module";
 import { sessionCookieMiddleware } from "./auth/session-cookies";
@@ -24,6 +25,9 @@ export async function createNestApp() {
 
   // Cookie sessions for browsers (+ CSRF check); see auth/session-cookies.ts
   app.use(sessionCookieMiddleware(config.corsOrigins));
+
+  // Installer uploads from the admin panel arrive as raw bytes on this one route only.
+  app.use("/v1/admin/releases/upload", raw({ type: "application/octet-stream", limit: "85mb" }));
 
   app.useGlobalPipes(
     new ValidationPipe({

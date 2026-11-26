@@ -3,6 +3,7 @@ import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { BillingService } from "../billing/billing.service";
 import { DatabaseService } from "../database/database.service";
 import { LicensesService } from "../licenses/licenses.service";
+import { PaymentsService } from "../payments/payments.service";
 
 export interface AdminStats {
   totalUsers: number;
@@ -10,8 +11,15 @@ export interface AdminStats {
   activeDevices: number;
   totalRevenueMinor: number;
   totalRevenueFormatted: string;
-  /** "database" = live numbers; "sample" = no database connected, illustrative figures. */
-  source: "database" | "sample";
+  /** "database" = live numbers; "memory" = no database connected, so real but lost on restart. */
+  source: "database" | "memory";
+  /** Money collected from checkout orders, per currency (what customers paid, fees included). */
+  revenue?: { currency: string; minor: number; text: string }[];
+  revenueLast30Days?: { currency: string; minor: number; text: string }[];
+  paidOrders?: number;
+  pendingOrders?: number;
+  reportsWaiting?: number;
+  revokedLicenses?: number;
 }
 
 export interface AuditLogEntry {
@@ -46,7 +54,8 @@ export class AdminService {
   constructor(
     @Optional() @Inject(DatabaseService) private readonly db?: DatabaseService,
     @Optional() @Inject(LicensesService) private readonly licensesService?: LicensesService,
-    @Optional() @Inject(BillingService) private readonly billingService?: BillingService
+    @Optional() @Inject(BillingService) private readonly billingService?: BillingService,
+    @Optional() @Inject(PaymentsService) private readonly paymentsService?: PaymentsService
   ) {}
 
   async getStats(): Promise<AdminStats> {
@@ -56,28 +65,34 @@ export class AdminService {
         const r = await db.query<{ n: string | null }>(sql);
         return Number(r.rows[0]?.n ?? 0);
       };
-      const revenue = await one(
-        "SELECT COALESCE(SUM(amount_minor), 0) AS n FROM payments WHERE status IN ('paid','succeeded','completed')"
-      );
+      const orders = (await this.paymentsService?.overview()) ?? null;
+      const usd = orders?.revenue.find((r) => r.currency === "USD")?.minor ?? 0;
       return {
         totalUsers: await one("SELECT COUNT(*) AS n FROM users"),
         activeLicenses: await one("SELECT COUNT(*) AS n FROM licenses WHERE status = 'active'"),
+        revokedLicenses: await one("SELECT COUNT(*) AS n FROM licenses WHERE status <> 'active'"),
         activeDevices: await one(
           "SELECT COUNT(*) AS n FROM license_activations WHERE status = 'active'"
         ),
-        totalRevenueMinor: revenue,
-        totalRevenueFormatted: `$${(revenue / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        totalRevenueMinor: usd,
+        totalRevenueFormatted: `$${(usd / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
         source: "database",
+        ...(orders ?? {}),
       };
     }
-    // No database connected (development / tests): clearly marked illustrative figures.
+    // No database connected (development / tests): the real in-memory numbers, clearly marked.
+    const counts = (await this.licensesService?.licenseCounts()) ?? { active: 0, revoked: 0, devices: 0, customers: 0 };
+    const orders = (await this.paymentsService?.overview()) ?? null;
+    const usd = orders?.revenue.find((r) => r.currency === "USD")?.minor ?? 0;
     return {
-      totalUsers: 1420,
-      activeLicenses: 1180,
-      activeDevices: 2450,
-      totalRevenueMinor: 4529000,
-      totalRevenueFormatted: "$45,290.00",
-      source: "sample",
+      totalUsers: counts.customers,
+      activeLicenses: counts.active,
+      revokedLicenses: counts.revoked,
+      activeDevices: counts.devices,
+      totalRevenueMinor: usd,
+      totalRevenueFormatted: `$${(usd / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      source: "memory",
+      ...(orders ?? {}),
     };
   }
 

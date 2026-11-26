@@ -688,6 +688,23 @@ export class PaymentsService implements OnModuleInit, OnModuleDestroy {
     return matched;
   }
 
+  /** For the admin overview: money collected (per currency), open orders, reports waiting. */
+  async overview() {
+    const stats = await this.store.orderStats(new Date(Date.now() - 30 * 24 * 3600_000));
+    const fmt = (x: { currency: string; minor: number }) => ({
+      currency: x.currency,
+      minor: x.minor,
+      text: formatMoney(x.minor, x.currency === "BDT" ? "BDT" : "USD"),
+    });
+    return {
+      paidOrders: stats.paid,
+      pendingOrders: stats.pending,
+      reportsWaiting: stats.reportsWaiting,
+      revenue: stats.revenue.map(fmt),
+      revenueLast30Days: stats.revenueSince.map(fmt),
+    };
+  }
+
   // ───────────────────────── admin: orders ─────────────────────────
 
   async adminOrders(status?: string) {
