@@ -31,6 +31,39 @@ export interface LicenseRecord {
   status: "active" | "revoked" | "expired" | "refunded";
   expires_at: string | null;
   created_at: string;
+  /** "manual" (issued by an admin) or the payment gateway that sold it. */
+  source?: string;
+  note?: string | null;
+  issued_by?: string | null;
+}
+
+export interface CustomerRecord {
+  id: string;
+  email: string;
+  display_name: string | null;
+}
+
+export interface AdminLicenseRow {
+  id: string;
+  email: string;
+  customerName: string | null;
+  planId: string;
+  planName: string;
+  planType: string;
+  status: string;
+  source: string;
+  note: string | null;
+  issuedBy: string | null;
+  activeDevices: number;
+  maxDevices: number;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface CreateLicenseOptions {
+  source?: string;
+  note?: string;
+  issuedBy?: string;
 }
 
 export interface DeviceRecord {
@@ -70,6 +103,7 @@ export class LicensesService {
   private readonly memoryLicenses = new Map<string, LicenseRecord>();
   private readonly memoryDevices = new Map<string, DeviceRecord>();
   private readonly memoryActivations = new Map<string, ActivationRecord>();
+  private readonly memoryCustomers = new Map<string, CustomerRecord>();
 
   private es256: Es256Service;
 
@@ -126,7 +160,8 @@ export class LicensesService {
    */
   async createLicense(
     userId: string,
-    planId: string
+    planId: string,
+    options: CreateLicenseOptions = {}
   ): Promise<{ licenseId: string; key: string; plan: PlanRecord }> {
     const plan = this.memoryPlans.get(planId);
     if (!plan) {
@@ -156,19 +191,114 @@ export class LicensesService {
       status: "active",
       expires_at: expiresAt,
       created_at: now.toISOString(),
+      source: options.source ?? "manual",
+      note: options.note ?? null,
+      issued_by: options.issuedBy ?? null,
     };
 
     if (this.db?.connected) {
       await this.db.query(
-        `INSERT INTO licenses (id, user_id, plan_id, key_hmac, status, expires_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [license.id, license.user_id, license.plan_id, license.key_hmac, license.status, license.expires_at, license.created_at]
+        `INSERT INTO licenses (id, user_id, plan_id, key_hmac, status, expires_at, created_at, source, note, issued_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [license.id, license.user_id, license.plan_id, license.key_hmac, license.status, license.expires_at, license.created_at, license.source, license.note, license.issued_by]
       );
     } else {
       this.memoryLicenses.set(licenseId, license);
     }
 
     return { licenseId, key, plan };
+  }
+
+  /** Finds the customer with this email, or creates one that cannot sign in with a password. */
+  async findOrCreateCustomer(email: string, displayName?: string): Promise<CustomerRecord> {
+    const clean = email.trim().toLowerCase();
+    if (this.db?.connected) {
+      // "!" is not a valid password hash, so a customer made by an admin cannot log in until they
+      // set a password through the normal "forgot password" flow.
+      const res = await this.db.query<CustomerRecord>(
+        `INSERT INTO users (email, password_hash, display_name)
+         VALUES ($1, '!', $2)
+         ON CONFLICT (email) DO UPDATE SET display_name = COALESCE(users.display_name, EXCLUDED.display_name)
+         RETURNING id, email, display_name`,
+        [clean, displayName?.trim() || null]
+      );
+      return res.rows[0];
+    }
+    let c = this.memoryCustomers.get(clean);
+    if (!c) {
+      c = { id: crypto.randomUUID(), email: clean, display_name: displayName?.trim() || null };
+      this.memoryCustomers.set(clean, c);
+    }
+    return c;
+  }
+
+  /** Issues a license to an email address by hand (the admin took the payment another way). */
+  async issueManualLicense(input: {
+    email: string;
+    name?: string;
+    planId: string;
+    note?: string;
+    issuedBy: string;
+  }): Promise<{ licenseId: string; key: string; plan: PlanRecord; email: string }> {
+    const customer = await this.findOrCreateCustomer(input.email, input.name);
+    const made = await this.createLicense(customer.id, input.planId, {
+      source: "manual",
+      note: input.note,
+      issuedBy: input.issuedBy,
+    });
+    return { ...made, email: customer.email };
+  }
+
+  /** Every license with its customer and plan. Keys are never listed: only their hash is stored. */
+  async listLicensesForAdmin(): Promise<AdminLicenseRow[]> {
+    const plans = new Map(this.getPlans().map((p) => [p.id, p]));
+    const toRow = (
+      l: LicenseRecord,
+      email: string,
+      name: string | null,
+      activeDevices: number
+    ): AdminLicenseRow => {
+      const plan = plans.get(l.plan_id);
+      return {
+        id: l.id,
+        email,
+        customerName: name,
+        planId: l.plan_id,
+        planName: plan?.name ?? l.plan_id,
+        planType: plan?.plan_type ?? "unknown",
+        status: l.status,
+        source: l.source ?? "manual",
+        note: l.note ?? null,
+        issuedBy: l.issued_by ?? null,
+        activeDevices,
+        maxDevices: plan?.max_devices ?? 0,
+        expiresAt: l.expires_at ? new Date(l.expires_at).toISOString() : null,
+        createdAt: new Date(l.created_at).toISOString(),
+      };
+    };
+
+    if (this.db?.connected) {
+      const res = await this.db.query<
+        LicenseRecord & { email: string; display_name: string | null; active_devices: string }
+      >(
+        `SELECT l.*, u.email, u.display_name,
+                (SELECT COUNT(*) FROM license_activations a WHERE a.license_id = l.id AND a.status = 'active') AS active_devices
+           FROM licenses l JOIN users u ON u.id = l.user_id
+          ORDER BY l.created_at DESC LIMIT 500`
+      );
+      return res.rows.map((r) => toRow(r, r.email, r.display_name, Number(r.active_devices)));
+    }
+
+    const byId = new Map([...this.memoryCustomers.values()].map((c) => [c.id, c]));
+    return [...this.memoryLicenses.values()]
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map((l) => {
+        const c = byId.get(l.user_id);
+        const active = [...this.memoryActivations.values()].filter(
+          (a) => a.license_id === l.id && a.status === "active"
+        ).length;
+        return toRow(l, c?.email ?? "unknown", c?.display_name ?? null, active);
+      });
   }
 
   /**

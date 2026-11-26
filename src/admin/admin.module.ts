@@ -8,12 +8,13 @@ import { SiteController } from "../site/site.controller";
 import { AdminAuthController } from "./admin-auth.controller";
 import { AdminAuthService } from "./admin-auth.service";
 import { AdminController } from "./admin.controller";
+import { AdminLicensesController } from "./admin-licenses.controller";
 import { AdminGuard } from "./admin.guard";
 import { AdminService } from "./admin.service";
 
 @Module({
   imports: [LicensesModule, BillingModule],
-  controllers: [AdminController, AdminAuthController, SiteController],
+  controllers: [AdminController, AdminAuthController, AdminLicensesController, SiteController],
   providers: [
     AdminService,
     AdminAuthService,
